@@ -1,10 +1,9 @@
 fs            = require 'fs'
 path          = require 'path'
+_             = require 'underscore'
 CoffeeScript  = require './lib/coffee-script'
 {spawn, exec} = require 'child_process'
 helpers       = require './lib/coffee-script/helpers'
-eco           = require 'eco' 
-hljs          = require 'highlight.js'
 
 # ANSI Terminal Colors.
 bold = red = green = reset = ''
@@ -43,26 +42,28 @@ run = (args, cb) ->
 log = (message, color, explanation) ->
   console.log color + message + reset + ' ' + (explanation or '')
 
-# Render code into site
-code_for = (file, executable = false, show_load = true) ->
-  ++@counter
-  return '' unless fs.existsSync "documentation/js/#{file}.js"
-  cs = fs.readFileSync "documentation/coffee/#{file}.coffee", 'utf-8'
-  js = fs.readFileSync "documentation/js/#{file}.js", 'utf-8'
-  js = js.replace /^\/\/\s*generated.*?\n/i, ''
-  cshtml  = hljs.highlight('coffeescript', cs).value
-  jshtml  = hljs.highlight('coffeescript', js).value
-  cshtml  = "<pre><code>#{cshtml}</code></pre>"
-  jshtml  = "<pre><code>#{jshtml}</code></pre>"
-  append  = if executable is true then '' else "alert(#{executable});"
-  if executable? and executable isnt true
-    cs    = cs.replace /(\S)\s*\Z/m, "\\1\n\nalert #{executable}"
-  run     = if executable is true then 'run' else "run: #{executable}"
-  name    = "example#{@counter}"
-  script  = "<script>window.#{name} = #{JSON.stringify(cs)}</script>"
-  _import = if show_load then "<div class='minibutton load' onclick='javascript: loadConsole(#{name});'>load</div>" else ''
-  button  = if executable? then "<div class='minibutton ok' onclick='javascript: #{js};#{append}'>#{run}</div>" else ''
-  "<div class='code'>#{cshtml}#{jshtml}#{script}#{_import}#{button}<br class='clear' /></div>"
+codeFor = ->
+  counter = 0
+  hljs = require 'highlight.js'
+  hljs.configure classPrefix: ''
+  (file, executable = false, showLoad = true) ->
+    counter++
+    return unless fs.existsSync "documentation/js/#{file}.js"
+    cs = fs.readFileSync "documentation/coffee/#{file}.coffee", 'utf-8'
+    js = fs.readFileSync "documentation/js/#{file}.js", 'utf-8'
+    js = js.replace /^\/\/ generated.*?\n/i, ''
+
+    cshtml = "<pre><code>#{hljs.highlight('coffeescript', cs).value}</code></pre>"
+    jshtml = "<pre><code>#{hljs.highlight('javascript', js).value}</code></pre>"
+    append = if executable is yes then '' else "alert(#{executable});"
+    if executable and executable != yes
+      cs.replace /(\S)\s*\Z/m, "$1\n\nalert #{executable}"
+    run    = if executable is true then 'run' else "run: #{executable}"
+    name   = "example#{counter}"
+    script = "<script>window.#{name} = #{JSON.stringify cs}</script>"
+    load   = if showLoad then "<div class='minibutton load' onclick='javascript: loadConsole(#{name});'>load</div>" else ''
+    button = if executable then "<div class='minibutton ok' onclick='javascript: #{js};#{append}'>#{run}</div>" else ''
+    "<div class='code'>#{cshtml}#{jshtml}#{script}#{load}#{button}<br class='clear' /></div>"
 
 option '-p', '--prefix [DIR]', 'set the installation prefix for `cake install`'
 
@@ -107,7 +108,6 @@ task 'build:parser', 'rebuild the Jison parser (run build first)', ->
   parser = require('./lib/coffee-script/grammar').parser
   fs.writeFile 'lib/coffee-script/parser.js', parser.generate()
 
-
 task 'build:browser', 'rebuild the merged script for inclusion in the browser', ->
   code = ''
   for name in ['helpers', 'rewriter', 'lexer', 'parser', 'scope', 'nodes', 'sourcemap', 'coffee-script', 'browser']
@@ -141,17 +141,17 @@ task 'build:browser', 'rebuild the merged script for inclusion in the browser', 
 
 
 task 'doc:site', 'watch and continually rebuild the documentation for the website', ->
-  source = "documentation/index.html"
-  exec "bin/coffee -bcw -o documentation/js documentation/coffee/*.coffee", (err) ->
-    throw err if err
-  do renderDocuments = ->
-    rendered = eco.render (fs.readFileSync source, 'utf-8'),
-      counter: 0
-      code_for: code_for
+  source = 'documentation/index.html.js'
+  exec 'bin/coffee -bc -o documentation/js documentation/coffee/*.coffee'
+
+  do renderIndex = ->
+    codeSnippetCounter = 0
+    rendered = _.template fs.readFileSync(source, 'utf-8'), codeFor: codeFor()
     fs.writeFileSync 'index.html', rendered
-    console.log "compiled doc:site"
-  fs.watchFile source, internal: 200, renderDocuments
-  console.log "watching..."
+    log "compiled", green, "#{source}"
+
+  fs.watchFile source, internal: 200, renderIndex
+  log "watching..." , green
 
 
 task 'doc:source', 'rebuild the internal documentation', ->
@@ -187,6 +187,7 @@ task 'bench', 'quick benchmark of compilation time', ->
 
 # Run the CoffeeScript test suite.
 runTests = (CoffeeScript) ->
+  CoffeeScript.register()
   startTime   = Date.now()
   currentFile = null
   passedTests = 0

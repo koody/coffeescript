@@ -59,7 +59,6 @@ grammar =
   Root: [
     o '',                                       -> new Block
     o 'Body'
-    o 'Block TERMINATOR'
   ]
 
   # 由任意语句和表达式组成, 被换行符或者分号分隔
@@ -192,9 +191,10 @@ grammar =
     o 'ParamVar',                               -> new Param $1
     o 'ParamVar ...',                           -> new Param $1, null, on
     o 'ParamVar = Expression',                  -> new Param $1, $3
+    o '...',                                    -> new Expansion
   ]
 
- # 各种函数参数.
+  # 函数参数.
   ParamVar: [
     o 'Identifier'
     o 'ThisProperty'
@@ -348,6 +348,7 @@ grammar =
   Arg: [
     o 'Expression'
     o 'Splat'
+    o '...',                                     -> new Expansion
   ]
 
   # 简单的, 逗号分隔的, 必须的参数 (没华丽的语法). 为了使这个规则可以在不支持多行的 **Switch** 块中使用, 我们把它和 **ArgList** 分离开来.
@@ -469,7 +470,7 @@ grammar =
   # 最基本的 *if* 只含条件和动作. 下面把 if 相关的规则拆分开来, 是为了避免二义性.
   IfBlock: [
     o 'IF Expression Block',                    -> new If $2, $3, type: $1
-    o 'IfBlock ELSE IF Expression Block',       -> $1.addElse new If $4, $5, type: $3
+    o 'IfBlock ELSE IF Expression Block',       -> $1.addElse LOC(3,5) new If $4, $5, type: $3
   ]
 
   # 其他 *if* 表达式的形式, 包含后缀式一行流的 *if* 和 *unless*.
@@ -486,8 +487,9 @@ grammar =
   # 但为了使优先级生效, 就得分别定义了.
   Operation: [
     o 'UNARY Expression',                       -> new Op $1 , $2
-    o '-     Expression',                      (-> new Op '-', $2), prec: 'UNARY'
-    o '+     Expression',                      (-> new Op '+', $2), prec: 'UNARY'
+    o 'UNARY_MATH Expression',                  -> new Op $1 , $2
+    o '-     Expression',                      (-> new Op '-', $2), prec: 'UNARY_MATH'
+    o '+     Expression',                      (-> new Op '+', $2), prec: 'UNARY_MATH'
 
     o '-- SimpleAssignable',                    -> new Op '--', $2
     o '++ SimpleAssignable',                    -> new Op '++', $2
@@ -501,6 +503,7 @@ grammar =
     o 'Expression -  Expression',               -> new Op '-' , $1, $3
 
     o 'Expression MATH     Expression',         -> new Op $2, $1, $3
+    o 'Expression **       Expression',         -> new Op $2, $1, $3
     o 'Expression SHIFT    Expression',         -> new Op $2, $1, $3
     o 'Expression COMPARE  Expression',         -> new Op $2, $1, $3
     o 'Expression LOGIC    Expression',         -> new Op $2, $1, $3
@@ -536,6 +539,8 @@ operators = [
   ['nonassoc',  '++', '--']
   ['left',      '?']
   ['right',     'UNARY']
+  ['right',     '**']
+  ['right',     'UNARY_MATH']
   ['left',      'MATH']
   ['left',      '+', '-']
   ['left',      'SHIFT']
@@ -546,7 +551,7 @@ operators = [
   ['right',     '=', ':', 'COMPOUND_ASSIGN', 'RETURN', 'THROW', 'EXTENDS']
   ['right',     'FORIN', 'FOROF', 'BY', 'WHEN']
   ['right',     'IF', 'ELSE', 'FOR', 'WHILE', 'UNTIL', 'LOOP', 'SUPER', 'CLASS']
-  ['right',     'POST_IF']
+  ['left',      'POST_IF']
 ]
 
 # 包装

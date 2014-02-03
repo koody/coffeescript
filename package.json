@@ -8,13 +8,8 @@
     "compiler"
   ],
   "author": "Jeremy Ashkenas",
-  "version": "1.6.3",
-  "licenses": [
-    {
-      "type": "MIT",
-      "url": "https://raw.github.com/jashkenas/coffee-script/master/LICENSE"
-    }
-  ],
+  "version": "1.7.0",
+  "license": "MIT",
   "engines": {
     "node": ">=0.8.0"
   },
@@ -38,7 +33,10 @@
   "devDependencies": {
     "uglify-js": "~2.2",
     "jison": ">=0.2.0",
-    "eco": "~1.1.0-rc-3",
-    "highlight.js": "~7.3.0"
+    "highlight.js": "~8.0.0",
+    "underscore": "~1.5.2"
+  },
+  "dependencies": {
+    "mkdirp": "~0.3.5"
   }
 }

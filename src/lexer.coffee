@@ -35,18 +35,19 @@ exports.Lexer = class Lexer
   # Before returning the token stream, run it through the [Rewriter](rewriter.html)
   # unless explicitly asked not to.
   tokenize: (code, opts = {}) ->
-    @literate = opts.literate  # Are we lexing literate CoffeeScript?
-    @indent   = 0              # The current indentation level.
-    @indebt   = 0              # The over-indentation at the current level.
-    @outdebt  = 0              # The under-outdentation at the current level.
-    @indents  = []             # The stack of all current indentation levels.
-    @ends     = []             # The stack for pairing up tokens.
-    @tokens   = []             # Stream of parsed tokens in the form `['TYPE', value, location data]`.
+    @literate   = opts.literate  # Are we lexing literate CoffeeScript?
+    @indent     = 0              # The current indentation level.
+    @baseIndent = 0              # The overall minimum indentation level
+    @indebt     = 0              # The over-indentation at the current level.
+    @outdebt    = 0              # The under-outdentation at the current level.
+    @indents    = []             # The stack of all current indentation levels.
+    @ends       = []             # The stack for pairing up tokens.
+    @tokens     = []             # Stream of parsed tokens in the form `['TYPE', value, location data]`.
 
     @chunkLine =
-        opts.line or 0         # The start line for the current @chunk.
+      opts.line or 0         # The start line for the current @chunk.
     @chunkColumn =
-        opts.column or 0       # The start column of the current @chunk.
+      opts.column or 0       # The start column of the current @chunk.
     code = @clean code         # The stripped, cleaned original source code.
 
     # At every position, run through this list of attempted matches,
@@ -83,8 +84,8 @@ exports.Lexer = class Lexer
     code = code.slice(1) if code.charCodeAt(0) is BOM
     code = code.replace(/\r/g, '').replace TRAILING_SPACES, ''
     if WHITESPACE.test code
-        code = "\n#{code}"
-        @chunkLine--
+      code = "\n#{code}"
+      @chunkLine--
     code = invertLiterate code if @literate
     code
 
@@ -185,19 +186,15 @@ exports.Lexer = class Lexer
   # Matches strings, including multi-line strings. Ensures that quotation marks
   # are balanced within the string's contents, and within nested interpolations.
   stringToken: ->
-    switch @chunk.charAt 0
-      when "'"
-        return 0 unless match = SIMPLESTR.exec @chunk
-        string = match[0]
-        @token 'STRING', string.replace(MULTILINER, '\\\n'), 0, string.length
-      when '"'
-        return 0 unless string = @balancedString @chunk, '"'
-        if 0 < string.indexOf '#{', 1
-          @interpolateString string[1...-1], strOffset: 1, lexedLength: string.length
-        else
-          @token 'STRING', @escapeLines string, 0, string.length
-      else
-        return 0
+    switch quote = @chunk.charAt 0
+      when "'" then [string] = SIMPLESTR.exec @chunk
+      when '"' then string = @balancedString @chunk, '"'
+    return 0 unless string
+    trimmed = @removeNewlines string[1...-1]
+    if quote is '"' and 0 < string.indexOf '#{', 1
+      @interpolateString trimmed, strOffset: 1, lexedLength: string.length
+    else
+      @token 'STRING', quote + @escapeLines(trimmed) + quote, 0, string.length
     if octalEsc = /^(?:\\.|[^\\])*\\(?:0[0-7]|[1-7])/.test string
       @error "octal escape sequences #{string} are not allowed"
     string.length
@@ -237,24 +234,24 @@ exports.Lexer = class Lexer
   # JavaScript and Ruby.
   regexToken: ->
     return 0 if @chunk.charAt(0) isnt '/'
-    if match = HEREGEX.exec @chunk
-      length = @heregexToken match
-      return length
+    return length if length = @heregexToken()
 
     prev = last @tokens
     return 0 if prev and (prev[0] in (if prev.spaced then NOT_REGEX else NOT_SPACED_REGEX))
     return 0 unless match = REGEX.exec @chunk
     [match, regex, flags] = match
+    # Avoid conflicts with floor division operator.
+    return 0 if regex is '//'
     if regex[..1] is '/*' then @error 'regular expressions cannot begin with `*`'
-    if regex is '//' then regex = '/(?:)/'
     @token 'REGEX', "#{regex}#{flags}", 0, match.length
     match.length
 
   # Matches multiline extended regular expressions.
-  heregexToken: (match) ->
+  heregexToken: ->
+    return 0 unless match = HEREGEX.exec @chunk
     [heregex, body, flags] = match
     if 0 > body.indexOf '#{'
-      re = body.replace(HEREGEX_OMIT, '').replace(/\//g, '\\/')
+      re = @escapeLines body.replace(HEREGEX_OMIT, '$1$2').replace(/\//g, '\\/'), yes
       if re.match /^\*/ then @error 'regular expressions cannot begin with `*`'
       @token 'REGEX', "/#{ re or '(?:)' }/#{flags}", 0, heregex.length
       return heregex.length
@@ -266,7 +263,7 @@ exports.Lexer = class Lexer
       if tag is 'TOKENS'
         tokens.push value...
       else if tag is 'NEOSTRING'
-        continue unless value = value.replace HEREGEX_OMIT, ''
+        continue unless value = value.replace HEREGEX_OMIT, '$1$2'
         # Convert NEOSTRING into STRING
         value = value.replace /\\/g, '\\\\'
         token[0] = 'STRING'
@@ -322,40 +319,51 @@ exports.Lexer = class Lexer
         @indebt = size - @indent
         @suppressNewlines()
         return indent.length
+      unless @tokens.length
+        @baseIndent = @indent = size
+        return indent.length
       diff = size - @indent + @outdebt
       @token 'INDENT', diff, indent.length - size, size
       @indents.push diff
       @ends.push 'OUTDENT'
       @outdebt = @indebt = 0
+      @indent = size
+    else if size < @baseIndent
+      @error 'missing indentation', indent.length
     else
       @indebt = 0
       @outdentToken @indent - size, noNewlines, indent.length
-    @indent = size
     indent.length
 
   # Record an outdent token or multiple tokens, if we happen to be moving back
-  # inwards past several recorded indents.
+  # inwards past several recorded indents. Sets new @indent value.
   outdentToken: (moveOut, noNewlines, outdentLength) ->
+    decreasedIndent = @indent - moveOut
     while moveOut > 0
-      len = @indents.length - 1
-      if @indents[len] is undefined
+      lastIndent = @indents[@indents.length - 1]
+      if not lastIndent
         moveOut = 0
-      else if @indents[len] is @outdebt
+      else if lastIndent is @outdebt
         moveOut -= @outdebt
         @outdebt = 0
-      else if @indents[len] < @outdebt
-        @outdebt -= @indents[len]
-        moveOut  -= @indents[len]
+      else if lastIndent < @outdebt
+        @outdebt -= lastIndent
+        moveOut  -= lastIndent
       else
         dent = @indents.pop() + @outdebt
-        moveOut -= dent
+        if outdentLength and @chunk[outdentLength] in INDENTABLE_CLOSERS
+          decreasedIndent -= dent - moveOut
+          moveOut = dent
         @outdebt = 0
+        # pair might call outdentToken, so preserve decreasedIndent
         @pair 'OUTDENT'
-        @token 'OUTDENT', dent, 0, outdentLength
+        @token 'OUTDENT', moveOut, 0, outdentLength
+        moveOut -= dent
     @outdebt -= moveOut if dent
     @tokens.pop() while @value() is ';'
 
     @token 'TERMINATOR', '\n', outdentLength, 0 unless @tag() is 'TERMINATOR' or noNewlines
+    @indent = decreasedIndent
     this
 
   # Matches and consumes non-meaningful whitespace. Tag the previous token
@@ -406,6 +414,7 @@ exports.Lexer = class Lexer
     else if value in COMPARE         then tag = 'COMPARE'
     else if value in COMPOUND_ASSIGN then tag = 'COMPOUND_ASSIGN'
     else if value in UNARY           then tag = 'UNARY'
+    else if value in UNARY_MATH      then tag = 'UNARY_MATH'
     else if value in SHIFT           then tag = 'SHIFT'
     else if value in LOGIC or value is '?' and prev?.spaced then tag = 'LOGIC'
     else if prev and not prev.spaced
@@ -518,14 +527,9 @@ exports.Lexer = class Lexer
   #    current chunk.
   interpolateString: (str, options = {}) ->
     {heredoc, regex, offsetInChunk, strOffset, lexedLength} = options
-    offsetInChunk = offsetInChunk || 0
-    strOffset = strOffset || 0
-    lexedLength = lexedLength || str.length
-
-    # Clip leading \n from heredoc
-    if heredoc and str.length > 0 and str[0] == '\n'
-      str = str[1...]
-      strOffset++
+    offsetInChunk ||= 0
+    strOffset ||= 0
+    lexedLength ||= str.length
 
     # Parse the string.
     tokens = []
@@ -540,6 +544,8 @@ exports.Lexer = class Lexer
         continue
       # NEOSTRING is a fake token.  This will be converted to a string below.
       tokens.push @makeToken('NEOSTRING', str[pi...i], strOffset + pi) if pi < i
+      unless errorToken
+        errorToken = @makeToken '', 'string interpolation', offsetInChunk + i + 1, 2
       inner = expr[1...-1]
       if inner.length
         [line, column] = @getLineAndColumnFromChunk(strOffset + i + 1)
@@ -565,7 +571,9 @@ exports.Lexer = class Lexer
     # If the first token is not a string, add a fake empty string to the beginning.
     tokens.unshift @makeToken('NEOSTRING', '', offsetInChunk) unless tokens[0][0] is 'NEOSTRING'
 
-    @token '(', '(', offsetInChunk, 0 if interpolated = tokens.length > 1
+    if interpolated = tokens.length > 1
+      @token '(', '(', offsetInChunk, 0, errorToken
+
     # Push all the tokens
     for token, i in tokens
       [tag, value] = token
@@ -605,8 +613,7 @@ exports.Lexer = class Lexer
       #     el.click((event) ->
       #       el.hide())
       #
-      @indent -= size = last @indents
-      @outdentToken size, true
+      @outdentToken last(@indents), true
       return @pair tag
     @ends.pop()
 
@@ -659,8 +666,9 @@ exports.Lexer = class Lexer
   # not specified, the length of `value` will be used.
   #
   # Returns the new token.
-  token: (tag, value, offsetInChunk, length) ->
+  token: (tag, value, offsetInChunk, length, origin) ->
     token = @makeToken tag, value, offsetInChunk, length
+    token.origin = origin if origin
     @tokens.push token
     token
 
@@ -675,26 +683,39 @@ exports.Lexer = class Lexer
   # Are we in the midst of an unfinished expression?
   unfinished: ->
     LINE_CONTINUER.test(@chunk) or
-    @tag() in ['\\', '.', '?.', '?::', 'UNARY', 'MATH', '+', '-', 'SHIFT', 'RELATION'
-               'COMPARE', 'LOGIC', 'THROW', 'EXTENDS']
+    @tag() in ['\\', '.', '?.', '?::', 'UNARY', 'MATH', 'UNARY_MATH', '+', '-',
+               '**', 'SHIFT', 'RELATION', 'COMPARE', 'LOGIC', 'THROW', 'EXTENDS']
+
+  # Remove newlines from beginning and (non escaped) from end of string literals.
+  removeNewlines: (str) ->
+    str.replace(/^\s*\n\s*/, '')
+       .replace(/([^\\]|\\\\)\s*\n\s*$/, '$1')
 
   # Converts newlines for string literals.
   escapeLines: (str, heredoc) ->
-    str.replace MULTILINER, if heredoc then '\\n' else ''
+    # Ignore escaped backslashes and remove escaped newlines
+    str = str.replace /\\[^\S\n]*(\n|\\)\s*/g, (escaped, character) ->
+      if character is '\n' then '' else escaped
+    if heredoc
+      str.replace MULTILINER, '\\n'
+    else
+      str.replace /\s*\n\s*/g, ' '
 
   # Constructs a string token by escaping quotes and newlines.
   makeString: (body, quote, heredoc) ->
     return quote + quote unless body
-    body = body.replace /\\([\s\S])/g, (match, contents) ->
-      if contents in ['\n', quote] then contents else match
+    # Ignore escaped backslashes and unescape quotes
+    body = body.replace /// \\( #{quote} | \\ ) ///g, (match, contents) ->
+      if contents is quote then contents else match
     body = body.replace /// #{quote} ///g, '\\$&'
     quote + @escapeLines(body, heredoc) + quote
 
   # Throws a compiler error on the current position.
-  error: (message) ->
+  error: (message, offset = 0) ->
     # TODO: Are there some cases we could improve the error line number by
     # passing the offset in the chunk where the error happened?
-    throwSyntaxError message, first_line: @chunkLine, first_column: @chunkColumn
+    [first_line, first_column] = @getLineAndColumnFromChunk offset
+    throwSyntaxError message, {first_line, first_column}
 
 # Constants
 # ---------
@@ -760,27 +781,27 @@ NUMBER     = ///
   ^ \d*\.?\d+ (?:e[+-]?\d+)?  # decimal
 ///i
 
-HEREDOC    = /// ^ ("""|''') ([\s\S]*?) (?:\n[^\n\S]*)? \1 ///
+HEREDOC    = /// ^ ("""|''') ((?: \\[\s\S] | [^\\] )*?) (?:\n[^\n\S]*)? \1 ///
 
 OPERATOR   = /// ^ (
   ?: [-=]>             # function
    | [-+*/%<>&|^!?=]=  # compound assign / compare
    | >>>=?             # zero-fill right shift
    | ([-+:])\1         # doubles
-   | ([&|<>])\2=?      # logic / shift
+   | ([&|<>*/%])\2=?   # logic / shift / power / floor division / modulo
    | \?(\.|::)         # soak access
    | \.{2,3}           # range or splat
 ) ///
 
 WHITESPACE = /^[^\n\S]+/
 
-COMMENT    = /^###([^#][\s\S]*?)(?:###[^\n\S]*|(?:###)$)|^(?:\s*#(?!##[^#]).*)+/
+COMMENT    = /^###([^#][\s\S]*?)(?:###[^\n\S]*|###$)|^(?:\s*#(?!##[^#]).*)+/
 
 CODE       = /^[-=]>/
 
 MULTI_DENT = /^(?:\n[^\n\S]*)+/
 
-SIMPLESTR  = /^'[^\\']*(?:\\.[^\\']*)*'/
+SIMPLESTR  = /^'[^\\']*(?:\\[\s\S][^\\']*)*'/
 
 JSTOKEN    = /^`[^\\`]*(?:\\.[^\\`]*)*`/
 
@@ -799,9 +820,13 @@ REGEX = /// ^
   /) ([imgy]{0,4}) (?!\w)
 ///
 
-HEREGEX      = /// ^ /{3} ([\s\S]+?) /{3} ([imgy]{0,4}) (?!\w) ///
+HEREGEX      = /// ^ /{3} ((?:\\?[\s\S])+?) /{3} ([imgy]{0,4}) (?!\w) ///
 
-HEREGEX_OMIT = /\s+(?:#.*)?/g
+HEREGEX_OMIT = ///
+    ((?:\\\\)+)     # consume (and preserve) an even number of backslashes
+  | \\(\s|/)        # preserve escaped whitespace and "de-escape" slashes
+  | \s+(?:#.*)?     # remove whitespace and comments
+///g
 
 # Token cleaning regexes.
 MULTILINER      = /\n/g
@@ -816,23 +841,26 @@ TRAILING_SPACES = /\s+$/
 
 # Compound assignment tokens.
 COMPOUND_ASSIGN = [
-  '-=', '+=', '/=', '*=', '%=', '||=', '&&=', '?=', '<<=', '>>=', '>>>=', '&=', '^=', '|='
+  '-=', '+=', '/=', '*=', '%=', '||=', '&&=', '?=', '<<=', '>>=', '>>>='
+  '&=', '^=', '|=', '**=', '//=', '%%='
 ]
 
 # Unary tokens.
-UNARY   = ['!', '~', 'NEW', 'TYPEOF', 'DELETE', 'DO']
+UNARY = ['NEW', 'TYPEOF', 'DELETE', 'DO']
+
+UNARY_MATH = ['!', '~']
 
 # Logical tokens.
-LOGIC   = ['&&', '||', '&', '|', '^']
+LOGIC = ['&&', '||', '&', '|', '^']
 
 # Bit-shifting tokens.
-SHIFT   = ['<<', '>>', '>>>']
+SHIFT = ['<<', '>>', '>>>']
 
 # Comparison tokens.
 COMPARE = ['==', '!=', '<', '>', '<=', '>=']
 
 # Mathematical tokens.
-MATH    = ['*', '/', '%']
+MATH = ['*', '/', '%', '//', '%%']
 
 # Relational tokens that are negatable with `not` prefix.
 RELATION = ['IN', 'OF', 'INSTANCEOF']
@@ -862,3 +890,6 @@ INDEXABLE = CALLABLE.concat 'NUMBER', 'BOOL', 'NULL', 'UNDEFINED'
 # occurs at the start of a line. We disambiguate these from trailing whens to
 # avoid an ambiguity in the grammar.
 LINE_BREAK = ['INDENT', 'OUTDENT', 'TERMINATOR']
+
+# Additional indent in front of these is ignored.
+INDENTABLE_CLOSERS = [')', '}', ']']
