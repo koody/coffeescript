@@ -92,10 +92,10 @@
           <div class="button">
           工具下载
           </div>
-          <div class="contents menu">
-              <a href="/lib/coffee-script/coffee-script.js" target="_blank">下载 &mdash; Coffeescript</a>
-              <a href="http://koala-app.com/index-zh.html" target="_blank">下载 &mdash; Koala</a>
-          </div>
+         <div class="contents menu">
+             <a href="http://github.com/jashkenas/coffee-script/tarball/master" target="_blank">下载 &mdash; Coffeescript</a>
+             <a href="http://koala-app.com/index-zh.html" target="_blank">下载 &mdash; Koala</a>
+         </div>
      </div>
     <div id="error" style="display:none;"></div>
   </div>
